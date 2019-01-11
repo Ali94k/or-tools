@@ -12,258 +12,136 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Generate SVG for a Routing problem."""
 
-"""Generate SVG for a VRP problem.
-
-   Manhattan average block 750x264ft -> 228x80m
-   src: https://nyti.ms/2GDoRIe "NY Times: Know Your distance"
-
-   Distances are in meters and time in minutes.
-"""
-
+# [START import]
 from __future__ import print_function
 import argparse
 import math
-import sys
-from six.moves import xrange
 from ortools.constraint_solver import pywrapcp
 from ortools.constraint_solver import routing_enums_pb2
+# [END import]
 
-###########################
-# Problem Data Definition #
-###########################
-class Vehicle():
-    """Stores the property of a vehicle"""
-    def __init__(self):
-        """Initializes the vehicle properties"""
-        self._capacity = 15
-        # Travel speed: 5km/h to convert in m/min
-        self._speed = 5 / 3.6 * 60
-
-    @property
-    def capacity(self):
-        """Gets vehicle capacity"""
-        return self._capacity
-
-    @property
-    def speed(self):
-        """Gets the average travel speed of a vehicle"""
-        return self._speed
-
-class CityBlock():
-    """City block definition"""
-    @property
-    def width(self):
-        """Gets Block size West to East"""
-        return 228/2
-
-    @property
-    def height(self):
-        """Gets Block size North to South"""
-        return 80
-
-class DataProblem():
-    """Stores the data for the problem"""
-    def __init__(self):
-        """Initializes the data for the problem"""
-        self._vehicle = Vehicle()
-        self._num_vehicles = 4
-
-        self._city_block = CityBlock()
-
-        # Locations in block unit
-        locations = \
-                [(4, 4), # depot
-                 (2, 0), (8, 0), # row 0
-                 (0, 1), (1, 1),
-                 (5, 2), (7, 2),
-                 (3, 3), (6, 3),
-                 (5, 5), (8, 5),
-                 (1, 6), (2, 6),
-                 (3, 7), (6, 7),
-                 (0, 8), (7, 8)]
-                # locations in meters using the block dimension defined
-        self._locations = [(
-            loc[0]*self.city_block.width,
-            loc[1]*self.city_block.height) for loc in locations]
-        self._depot = 0
-
-        self._demands = \
-            [0, # depot
-             1, 1, # row 0
-             2, 4,
-             2, 4,
-             8, 8,
-             1, 2,
-             1, 2,
-             4, 4,
-             8, 8]
-
-        self._time_windows = \
-            [(0, 0),
-             (75, 85), (75, 85), # 1, 2
-             (60, 70), (45, 55), # 3, 4
-             (0, 8), (50, 60), # 5, 6
-             (0, 10), (10, 20), # 7, 8
-             (0, 10), (75, 85), # 9, 10
-             (85, 95), (5, 15), # 11, 12
-             (15, 25), (10, 20), # 13, 14
-             (45, 55), (30, 40)] # 15, 16
-
-    @property
-    def vehicle(self):
-        """Gets a vehicle"""
-        return self._vehicle
-
-    @property
-    def num_vehicles(self):
-        """Gets number of vehicles"""
-        return self._num_vehicles
-
-    @property
-    def city_block(self):
-        """Gets a city block"""
-        return self._city_block
-
-    @property
-    def locations(self):
-        """Gets locations"""
-        return self._locations
-
-    @property
-    def num_locations(self):
-        """Gets number of locations"""
-        return len(self.locations)
-
-    @property
-    def depot(self):
-        """Gets depot location index"""
-        return self._depot
-
-    @property
-    def demands(self):
-        """Gets demands at each location"""
-        return self._demands
-
-    @property
-    def time_per_demand_unit(self):
-        """Gets the time (in s) to load a demand"""
-        return 5 # 5 minutes/unit
-
-    @property
-    def time_windows(self):
-        """Gets (start time, end time) for each locations"""
-        return self._time_windows
-
-    def manhattan_distance(self, from_node, to_node):
-        """Computes the Manhattan distance between two nodes"""
-        return (abs(self.locations[from_node][0] - self.locations[to_node][0]) +
-                abs(self.locations[from_node][1] - self.locations[to_node][1]))
-
-#######################
-# Problem Constraints #
-#######################
-class CreateDistanceEvaluator(object): # pylint: disable=too-few-public-methods
-    """Creates callback to return distance between points."""
-    def __init__(self, data):
-        """Initializes the distance matrix."""
-        self._distance = {}
-
-        # precompute distance between location to have distance callback in O(1)
-        for from_node in xrange(data.num_locations):
-            self._distance[from_node] = {}
-            for to_node in xrange(data.num_locations):
-                if from_node == to_node:
-                    self._distance[from_node][to_node] = 0
-                else:
-                    self._distance[from_node][to_node] = (
-                        data.manhattan_distance(from_node, to_node))
-
-    def distance(self, from_node, to_node):
-        """Returns the manhattan distance between the two nodes"""
-        return self._distance[from_node][to_node]
-
-def add_global_span_constraints(routing, data, dist_callback):
-    """Add Global Span constraint"""
-    distance = "Distance"
-    routing.AddDimension(
-        dist_callback,
-        0, # null slack
-        3000, # maximum distance per vehicle
-        True, # start cumul to zero
-        distance)
-    distance_dimension = routing.GetDimensionOrDie(distance)
-    # Try to minimize the max distance among vehicles.
-    # /!\ It doesn't mean the standard deviation is minimized
-    distance_dimension.SetGlobalSpanCostCoefficient(100)
-
-class CreateDemandEvaluator(object): # pylint: disable=too-few-public-methods
-    """Creates callback to get demands at each location."""
-    def __init__(self, data):
-        """Initializes the demand array."""
-        self._demands = data.demands
-
-    def demand(self, from_node, to_node):
-        """Returns the demand of the current node"""
-        del to_node
-        return self._demands[from_node]
-
-def add_capacity_constraints(routing, data, demand_callback):
-    """Adds capacity constraint"""
-    capacity = "Capacity"
-    routing.AddDimension(
-        demand_callback,
-        0, # null capacity slack
-        data.vehicle.capacity,
-        True, # start cumul to zero
-        capacity)
-
-class CreateTimeEvaluator(object):
-    """Creates callback to get total times between locations."""
-    @staticmethod
-    def service_time(data, node):
-        """Gets the service time for the specified location."""
-        return data.demands[node] * data.time_per_demand_unit
-
-    @staticmethod
-    def travel_time(data, from_node, to_node):
-        """Gets the travel times between two locations."""
-        if from_node == to_node:
-            travel_time = 0
-        else:
-            travel_time = data.manhattan_distance(from_node, to_node) / data.vehicle.speed
-        return travel_time
-
-    def __init__(self, data):
-        """Initializes the total time matrix."""
-        self._total_time = {}
-        # precompute total time to have time callback in O(1)
-        for from_node in xrange(data.num_locations):
-            self._total_time[from_node] = {}
-            for to_node in xrange(data.num_locations):
-                if from_node == to_node:
-                    self._total_time[from_node][to_node] = 0
-                else:
-                    self._total_time[from_node][to_node] = (
-                        self.service_time(data, from_node) +
-                        self.travel_time(data, from_node, to_node))
-
-    def time_evaluator(self, from_node, to_node):
-        """Returns the total time between the two nodes"""
-        return self._total_time[from_node][to_node]
-
-def add_time_window_constraints(routing, data, time_evaluator):
-    """Add Global Span constraint"""
-    time = "Time"
-    routing.AddDimension(
-        time_evaluator,
-        320, # waiting allowed
-        320, # maximum time per vehicle
-        True, # start cumul to zero
-        time)
-    time_dimension = routing.GetDimensionOrDie(time)
-    for count, time_window in enumerate(data.time_windows):
-        time_dimension.CumulVar(count).SetRange(time_window[0], time_window[1])
+# [START data_model]
+def create_data_model():
+    """Stores the data for the problem."""
+    data = {}
+    data['distance_matrix'] = [
+        [
+            0, 548, 776, 696, 582, 274, 502, 194, 308, 194, 536, 502, 388, 354,
+            468, 776, 662
+        ],
+        [
+            548, 0, 684, 308, 194, 502, 730, 354, 696, 742, 1084, 594, 480, 674,
+            1016, 868, 1210
+        ],
+        [
+            776, 684, 0, 992, 878, 502, 274, 810, 468, 742, 400, 1278, 1164,
+            1130, 788, 1552, 754
+        ],
+        [
+            696, 308, 992, 0, 114, 650, 878, 502, 844, 890, 1232, 514, 628, 822,
+            1164, 560, 1358
+        ],
+        [
+            582, 194, 878, 114, 0, 536, 764, 388, 730, 776, 1118, 400, 514, 708,
+            1050, 674, 1244
+        ],
+        [
+            274, 502, 502, 650, 536, 0, 228, 308, 194, 240, 582, 776, 662, 628,
+            514, 1050, 708
+        ],
+        [
+            502, 730, 274, 878, 764, 228, 0, 536, 194, 468, 354, 1004, 890, 856,
+            514, 1278, 480
+        ],
+        [
+            194, 354, 810, 502, 388, 308, 536, 0, 342, 388, 730, 468, 354, 320,
+            662, 742, 856
+        ],
+        [
+            308, 696, 468, 844, 730, 194, 194, 342, 0, 274, 388, 810, 696, 662,
+            320, 1084, 514
+        ],
+        [
+            194, 742, 742, 890, 776, 240, 468, 388, 274, 0, 342, 536, 422, 388,
+            274, 810, 468
+        ],
+        [
+            536, 1084, 400, 1232, 1118, 582, 354, 730, 388, 342, 0, 878, 764,
+            730, 388, 1152, 354
+        ],
+        [
+            502, 594, 1278, 514, 400, 776, 1004, 468, 810, 536, 878, 0, 114,
+            308, 650, 274, 844
+        ],
+        [
+            388, 480, 1164, 628, 514, 662, 890, 354, 696, 422, 764, 114, 0, 194,
+            536, 388, 730
+        ],
+        [
+            354, 674, 1130, 822, 708, 628, 856, 320, 662, 388, 730, 308, 194, 0,
+            342, 422, 536
+        ],
+        [
+            468, 1016, 788, 1164, 1050, 514, 514, 662, 320, 274, 388, 650, 536,
+            342, 0, 764, 194
+        ],
+        [
+            776, 868, 1552, 560, 674, 1050, 1278, 742, 1084, 810, 1152, 274,
+            388, 422, 764, 0, 798
+        ],
+        [
+            662, 1210, 754, 1358, 1244, 708, 480, 856, 514, 468, 354, 844, 730,
+            536, 194, 798, 0
+        ],
+    ]
+    data['time_matrix'] = [
+        [0, 6, 9, 8, 7, 3, 6, 2, 3, 2, 6, 6, 4, 4, 5, 9, 7],
+        [6, 0, 8, 3, 2, 6, 8, 4, 8, 8, 13, 7, 5, 8, 12, 10, 14],
+        [9, 8, 0, 11, 10, 6, 3, 9, 5, 8, 4, 15, 14, 13, 9, 18, 9],
+        [8, 3, 11, 0, 1, 7, 10, 6, 10, 10, 14, 6, 7, 9, 14, 6, 16],
+        [7, 2, 10, 1, 0, 6, 9, 4, 8, 9, 13, 4, 6, 8, 12, 8, 14],
+        [3, 6, 6, 7, 6, 0, 2, 3, 2, 2, 7, 9, 7, 7, 6, 12, 8],
+        [6, 8, 3, 10, 9, 2, 0, 6, 2, 5, 4, 12, 10, 10, 6, 15, 5],
+        [2, 4, 9, 6, 4, 3, 6, 0, 4, 4, 8, 5, 4, 3, 7, 8, 10],
+        [3, 8, 5, 10, 8, 2, 2, 4, 0, 3, 4, 9, 8, 7, 3, 13, 6],
+        [2, 8, 8, 10, 9, 2, 5, 4, 3, 0, 4, 6, 5, 4, 3, 9, 5],
+        [6, 13, 4, 14, 13, 7, 4, 8, 4, 4, 0, 10, 9, 8, 4, 13, 4],
+        [6, 7, 15, 6, 4, 9, 12, 5, 9, 6, 10, 0, 1, 3, 7, 3, 10],
+        [4, 5, 14, 7, 6, 7, 10, 4, 8, 5, 9, 1, 0, 2, 6, 4, 8],
+        [4, 8, 13, 9, 8, 7, 10, 3, 7, 4, 8, 3, 2, 0, 4, 5, 6],
+        [5, 12, 9, 14, 12, 6, 6, 7, 3, 3, 4, 7, 6, 4, 0, 9, 2],
+        [9, 10, 18, 6, 8, 12, 15, 8, 13, 9, 13, 3, 4, 5, 9, 0, 9],
+        [7, 14, 9, 16, 14, 8, 5, 10, 6, 5, 4, 10, 8, 6, 2, 9, 0],
+    ]
+    data['time_windows'] = [
+        (0, 0),  # depot
+        (10, 15),  # 1
+        (10, 15),  # 2
+        (5, 10),  # 3
+        (5, 10),  # 4
+        (0, 5),  # 5
+        (5, 10),  # 6
+        (0, 5),  # 7
+        (5, 10),  # 8
+        (0, 5),  # 9
+        (10, 15),  # 10
+        (10, 15),  # 11
+        (0, 5),  # 12
+        (5, 10),  # 13
+        (5, 10),  # 14
+        (10, 15),  # 15
+        (5, 10),  # 16
+    ]
+    data['demands'] = [0, 1, 1, 2, 4, 2, 4, 8, 8, 1, 2, 1, 2, 4, 4, 8, 8]
+    data['num_vehicles'] = 4
+    data['vehicle_capacities'] = [15, 15, 15, 15]
+    data['depot'] = 0
+    data['starts'] = [1, 2, 15, 16]
+    data['ends'] = [0, 0, 0, 0]
+    return data
+    # [END data_model]
 
 ###########
 # Printer #
@@ -281,35 +159,35 @@ class GoogleColorPalette():
             ('white', r'#FFFFFF')]
 
     def __getitem__(self, key):
-        """Gets color name from idx"""
+        """Gets color name from idx."""
         return self._colors[key][0]
 
     def __len__(self):
-        """Gets the number of colors"""
+        """Gets the number of colors."""
         return len(self._colors)
 
     @property
     def colors(self):
-        """Gets the colors list"""
+        """Gets the colors list."""
         return self._colors
 
     def name(self, idx):
-        """Return color name from idx"""
+        """Return color name from idx."""
         return self._colors[idx][0]
 
     def value(self, idx):
-        """Return color value from idx"""
+        """Return color value from idx."""
         return self._colors[idx][1]
 
     def value_from_name(self, name):
-        """Return color value from name"""
+        """Return color value from name."""
         return dict(self._colors)[name]
 
 class SVG():
-    """SVG draw primitives"""
+    """SVG draw primitives."""
     @staticmethod
     def header(size, margin):
-        """Writes header"""
+        """Writes header."""
         print(r'<svg xmlns:xlink="http://www.w3.org/1999/xlink" '
               'xmlns="http://www.w3.org/2000/svg" version="1.1"\n'
               'width="{width}" height="{height}" '
@@ -335,12 +213,12 @@ class SVG():
 
     @staticmethod
     def footer():
-        """Writes svg footer"""
+        """Writes svg footer."""
         print(r'</svg>')
 
     @staticmethod
     def draw_line(position_1, position_2, size, fg_color):
-        """Draws a line"""
+        """Draws a line."""
         line_style = (
             r'style="stroke-width:{sz};stroke:{fg};fill:none"').format(
                 sz=size,
@@ -354,7 +232,7 @@ class SVG():
 
     @staticmethod
     def draw_polyline(position_1, position_2, size, fg_color, colorname):
-        """Draws a line with arrow maker in the middle"""
+        """Draws a line with arrow maker in the middle."""
         polyline_style = (
             r'style="stroke-width:{sz};stroke:{fg};fill:none;'
             'marker-mid:url(#arrow_{colorname})"').format(
@@ -372,7 +250,7 @@ class SVG():
 
     @staticmethod
     def draw_circle(position, radius, size, fg_color, bg_color='white'):
-        """Print a circle"""
+        """Print a circle."""
         circle_style = (
             r'style="stroke-width:{sz};stroke:{fg};fill:{bg}"').format(
                 sz=size,
@@ -386,7 +264,7 @@ class SVG():
 
     @staticmethod
     def draw_text(text, position, size, fg_color='none', bg_color='black'):
-        """Print a middle centred text"""
+        """Print a middle centred text."""
         text_style = (
             r'style="text-anchor:middle;font-weight:bold;'
             'font-size:{sz};stroke:{fg};fill:{bg}"').format(
@@ -401,9 +279,9 @@ class SVG():
             txt=text))
 
 class SVGPrinter():
-    """Generate Problem as svg file to stdout"""
+    """Generate Problem as svg file to stdout."""
     def __init__(self, args, data, manager=None, routing=None, assignment=None):
-        """Initializes the printer"""
+        """Initializes the printer."""
         self._args = args
         self._data = data
         self._manager = manager
@@ -417,36 +295,44 @@ class SVGPrinter():
 
     @property
     def color_palette(self):
-        """Gets the color palette"""
+        """Gets the color palette."""
         return self._color_palette
 
     @property
     def svg(self):
-        """Gets the svg"""
+        """Gets the svg."""
         return self._svg
 
     @property
     def data(self):
-        """Gets the Data Problem"""
+        """Gets the Data Problem."""
         return self._data
 
     def draw_grid(self):
-        """Draws the city grid"""
+        """Draws the city grid."""
         print(r'<!-- Print city streets -->')
         color = '#969696'
         # Horizontal streets
-        for i in xrange(9):
+        for i in range(9):
             p_1 = [0, i*self.data.city_block.height]
             p_2 = [8*self.data.city_block.width, p_1[1]]
             self.svg.draw_line(p_1, p_2, 2, color)
         # Vertical streets
-        for i in xrange(9):
+        for i in range(9):
             p_1 = [i*self.data.city_block.width, 0]
             p_2 = [p_1[0], 8*self.data.city_block.height]
             self.svg.draw_line(p_1, p_2, 2, color)
 
     def draw_depot(self):
-        """Draws the depot"""
+        """Draws the depot."""
+        print(r'<!-- Print depot -->')
+        color = self.color_palette.value_from_name('black')
+        loc = self.data.locations[self.data.depot]
+        self.svg.draw_circle(loc, self.radius, self.stroke_width, color, 'white')
+        self.svg.draw_text(self.data.depot, loc, self.radius, 'none', color)
+
+    def draw_depots(self):
+        """Draws the depot."""
         print(r'<!-- Print depot -->')
         color = self.color_palette.value_from_name('black')
         loc = self.data.locations[self.data.depot]
@@ -454,9 +340,9 @@ class SVGPrinter():
         self.svg.draw_text(self.data.depot, loc, self.radius, 'none', color)
 
     def draw_locations(self):
-        """Draws all the locations but the depot"""
+        """Draws all the locations but the depot."""
         print(r'<!-- Print locations -->')
-        color = self.color_palette.value(0)
+        color = self.color_palette.value_from_name('blue')
         for idx, loc in enumerate(self.data.locations):
             if idx == self.data.depot:
                 continue
@@ -464,29 +350,31 @@ class SVGPrinter():
             self.svg.draw_text(idx, loc, self.radius, 'none', color)
 
     def draw_demands(self):
-        """Draws all the demands"""
+        """Draws all the demands."""
         print(r'<!-- Print demands -->')
         for idx, loc in enumerate(self.data.locations):
             if idx == self.data.depot:
                 continue
             demand = self.data.demands[idx]
             position = [x+y for x, y in zip(loc, [self.radius*1.2, self.radius*1.1])]
-            color = self.color_palette.value(int(math.log(demand, 2)))
-            self.svg.draw_text(demand, position, self.radius, 'white', color)
+            color = self.color_palette.value_from_name('red')
+            #color = self.color_palette.value(int(math.log(demand, 2)))
+            self.svg.draw_text(demand, position, self.radius, 'none', color)
 
     def draw_time_windows(self):
-        """Draws all the time windows"""
+        """Draws all the time windows."""
         print(r'<!-- Print time windows -->')
         for idx, loc in enumerate(self.data.locations):
             if idx == self.data.depot:
                 continue
             time_window = self.data.time_windows[idx]
             position = [x+y for x, y in zip(loc, [self.radius*0, -self.radius*1.6])]
+            color = self.color_palette.value_from_name('red')
             self.svg.draw_text(
                 '[{t1},{t2}]'.format(t1=time_window[0], t2=time_window[1]),
                 position,
                 self.radius*0.75,
-                'none', 'black')
+                'none', color)
 ##############
 ##  ROUTES  ##
 ##############
@@ -496,7 +384,7 @@ class SVGPrinter():
             print('<!-- No solution found. -->')
             return []
         routes = []
-        for vehicle_id in xrange(self.data.num_vehicles):
+        for vehicle_id in range(self.data.num_vehicles):
             index = self._routing.Start(vehicle_id)
             route = []
             while not self._routing.IsEnd(index):
@@ -545,7 +433,7 @@ class SVGPrinter():
         time_dimension = self._routing.GetDimensionOrDie('Time')
         loc_routes = []
         tw_routes = []
-        for vehicle_id in xrange(self.data.num_vehicles):
+        for vehicle_id in range(self.data.num_vehicles):
             index = self._routing.Start(vehicle_id) # ignore depot
             index = self._assignment.Value(self._routing.NextVar(index))
             loc_route = []
@@ -593,12 +481,17 @@ class SVGPrinter():
             self.draw_locations()
         else:
             self.draw_routes()
-        self.draw_depot()
+        if self._args['starts-ends'] is True:
+            self.draw_depots()
+        else:
+            self.draw_depot()
         if self._args['capacity'] is True:
             self.draw_demands()
-        if self._args['time_window'] is True:
+        if self._args['drop-nodes'] is True:
+            self.draw_demands()
+        if self._args['time-windows'] is True:
             self.draw_time_windows()
-        if self._args['time_window'] is True and self._args['solution'] is True:
+        if self._args['time-window'] is True and self._args['solution'] is True:
             self.draw_tw_routes()
         self.svg.footer()
 
@@ -608,6 +501,14 @@ class SVGPrinter():
 def main():
     """Entry point of the program"""
     parser = argparse.ArgumentParser(description='Output VRP as svg image.')
+    parser.add_argument(
+        '-tsp', '--tsp',
+        action='store_true',
+        help='use 1 vehicle')
+    parser.add_argument(
+        '-vrp', '--vrp',
+        action='store_true',
+        help='use 4 vehicle')
     parser.add_argument(
         '-gs', '--global-span',
         action='store_true',
@@ -633,52 +534,90 @@ def main():
         action='store_true',
         help='use pickup & delivery constraints')
     parser.add_argument(
-        '-f', '--fuel',
-        action='store_true',
-        help='use fuel constraints')
-    parser.add_argument(
-        '-r', '--resource',
-        action='store_true',
-        help='use resource constraints')
-    parser.add_argument(
         '-s', '--solution',
         action='store_true',
         help='print solution')
     args = vars(parser.parse_args())
 
-    # Instanciate the data problem.
-    data = DataProblem()
+    # Instantiate the data problem.
+    # [START data]
+    data = create_data_model()
+    if args['tsp'] is True:
+        data['num_vehicles'] = 1
+    if args['vrp'] is True:
+        data['num_vehicles'] = 4
+    if args['drop-nodes'] is True:
+        data['demands'] = [0, 1, 1, 3, 6, 3, 6, 8, 8, 1, 2, 1, 2, 6, 6, 8, 8]
+    # [END data]
 
-    # Create solver if needed
-    if args['solution'] is True:
-        # Create Routing Model
-        routing = pywrapcp.RoutingModel(data.num_locations, data.num_vehicles, data.depot)
-        # Define weight of each edge
-        dist_callback = CreateDistanceEvaluator(data).distance
-        routing.SetArcCostEvaluatorOfAllVehicles(dist_callback)
-        if args['global_span'] is True:
-            add_global_span_constraints(routing, data, dist_callback)
-        if args['capacity'] is True:
-            demand_evaluator = CreateDemandEvaluator(data).demand
-            add_capacity_constraints(routing, data, demand_evaluator)
-        if args['time_windows'] is True:
-            time_evaluator = CreateTimeEvaluator(data).time_evaluator
-            add_time_window_constraints(routing, data, time_evaluator)
-        if args['fuel'] is True:
-            add_fuel_constraints(routing, data)
-        if args['resource'] is True:
-            add_ressource_constraints(routing, data)
-        # Setting first solution heuristic (cheapest addition).
-        search_parameters = pywrapcp.RoutingModel.DefaultSearchParameters()
-        search_parameters.first_solution_strategy = (
-            routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC)
-        # Solve the problem.
-        assignment = routing.SolveWithParameters(search_parameters)
-        printer = SVGPrinter(args, data, manager, routing, assignment)
+    # Create the routing index manager.
+    # [START index_manager]
+    if args['starts-ends'] is True:
+        manager = pywrapcp.RoutingIndexManager(
+            len(data['distance_matrix']),
+            data['num_vehicles'],
+            data['starts'],
+            data['ends'])
     else:
+        manager = pywrapcp.RoutingIndexManager(
+            len(data['distance_matrix']),
+            data['num_vehicles'],
+            data['depot'])
+    # [END index_manager]
+
+    if args['solution'] is False:
         # Print svg on cout
         printer = SVGPrinter(args, data)
-    printer.print()
+        printer.print()
+
+    # Create Routing Model.
+    # [START routing_model]
+    routing = pywrapcp.RoutingModel(manager)
+    # [END routing_model]
+
+    # Register Callback
+    def distance_callback(from_index, to_index):
+        """Returns the manhattan distance between the two nodes."""
+        # Convert from routing variable Index to distance matrix NodeIndex.
+        from_node = manager.IndexToNode(from_index)
+        to_node = manager.IndexToNode(to_index)
+        return data['distance_matrix'][from_node][to_node]
+    distance_callback_index = routing.RegisterTransitCallback(distance_callback)
+    def time_callback(from_index, to_index):
+        """Returns the manhattan distance travel time between the two nodes."""
+        # Convert from routing variable Index to distance matrix NodeIndex.
+        from_node = manager.IndexToNode(from_index)
+        to_node = manager.IndexToNode(to_index)
+        return data['time_matrix'][from_node][to_node]
+    time_callback_index = routing.RegisterTransitCallback(time_callback)
+    def demand_callback(from_index):
+        """Returns the demand of the node."""
+        # Convert from routing variable Index to demands NodeIndex.
+        from_node = manager.IndexToNode(from_index)
+        return data['demands'][from_node]
+    demand_callback_index = routing.RegisterUnaryTransitCallback(demand_callback)
+
+    if args['time-windows'] is True:
+        routing.SetArcCostEvaluatorOfAllVehicles(time_callback_index)
+    else:
+        routing.SetArcCostEvaluatorOfAllVehicles(dist_callback_index)
+
+    if args['global_span'] is True:
+        add_global_span_constraints(routing, data, dist_callback)
+    if args['capacity'] is True:
+        demand_evaluator = CreateDemandEvaluator(data).demand
+        add_capacity_constraints(routing, data, demand_evaluator)
+    if args['time-windows'] is True:
+        time_evaluator = CreateTimeEvaluator(data).time_evaluator
+        add_time_window_constraints(routing, data, time_evaluator)
+    # Setting first solution heuristic (cheapest addition).
+    search_parameters = pywrapcp.RoutingModel.DefaultSearchParameters()
+    search_parameters.first_solution_strategy = (
+        routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC)
+    # Solve the problem.
+    assignment = routing.SolveWithParameters(search_parameters)
+    printer = SVGPrinter(args, data, manager, routing, assignment)
+
 
 if __name__ == '__main__':
     main()
